@@ -117,6 +117,13 @@ node --check lib/markdown.js
 node --check lib/storage.js
 ```
 
+## 关于作者
+
+- 🔥 获客操盘手，累计操盘成交 2 亿
+- 🤖 AI 学习者，探索新时代的获客姿势
+- 💡 公众号「BookNote」
+- 🐦 X: https://x.com/Dunduncoming
+
 ## License
 
 MIT

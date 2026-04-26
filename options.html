@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>视频文案采集器设置</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main class="page">
+    <h1>视频文案采集器设置</h1>
+    <p class="hint">API Key 仅保存在本机浏览器。抖音视频会先上传到用户自己的 DashScope 文件存储后再转写。</p>
+
+    <label>
+      接口类型
+      <select id="provider">
+        <option value="dashscope">阿里百炼 Paraformer</option>
+        <option value="custom">自定义转写 API</option>
+      </select>
+    </label>
+
+    <label id="api-url-row">
+      自定义 API 地址
+      <input id="api-url" placeholder="https://example.com/transcribe">
+    </label>
+
+    <label>
+      API Key
+      <input id="api-key" type="password" placeholder="sk-...">
+    </label>
+
+    <label>
+      模型
+      <input id="model" placeholder="paraformer-v2">
+    </label>
+
+    <label>
+      Obsidian 文件名前缀
+      <input id="obsidian-prefix" placeholder="视频转写">
+    </label>
+
+    <label class="checkbox">
+      <input id="auto-open-obsidian" type="checkbox">
+      转写完成后自动打开 Obsidian
+    </label>
+
+    <div class="actions">
+      <button id="save-btn">保存设置</button>
+      <button id="test-btn" type="button">测试连接</button>
+    </div>
+
+    <p id="status" class="status"></p>
+
+    <section class="spec">
+      <h2>接口格式</h2>
+      <pre>阿里百炼模式：
+API地址无需填写，插件自动调用：
+https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription
+
+自定义模式：
+POST API地址
+Authorization: Bearer API_KEY
+Content-Type: application/json
+
+{
+  "videoUrl": "...",
+  "sourceUrl": "...",
+  "platform": "xhs 或 douyin"
+}</pre>
+      <p>返回字段支持：<code>content</code>、<code>text</code>、<code>transcript</code>、<code>result</code>。</p>
+    </section>
+  </main>
+  <script src="lib/storage.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

@@ -40,6 +40,33 @@
 4. 选择本目录：`video-transcript-clipper`
 5. 打开扩展设置页，配置 API
 
+### 国内用户获取方式
+
+如果无法访问 GitHub 或 Chrome Web Store，可以使用以下方式：
+
+1. 让已下载项目的人把插件源码目录打包成 ZIP 发给你。
+2. 解压 ZIP，确认解压后的目录里能看到 `manifest.json`。
+3. 在浏览器扩展管理页开启「开发者模式」。
+4. 点击「加载已解压的扩展程序」，选择解压后的目录。
+
+也可以把项目同步到国内代码托管或网盘后再下载。只要目录里包含 `manifest.json`、`popup.js`、`options.html` 等文件，就可以用开发者模式加载。
+
+注意：不要直接加载 GitHub 下载下来的外层压缩包目录。如果打开目录后看不到 `manifest.json`，说明选错层级了。
+
+### Edge 浏览器安装
+
+这个插件是 Manifest V3 浏览器扩展，不只 Chrome 能用，Microsoft Edge 也可以使用。
+
+Edge 开发者模式安装步骤：
+
+1. 打开 Edge 扩展管理页：`edge://extensions/`
+2. 开启「开发人员模式」。
+3. 点击「加载解压缩的扩展」。
+4. 选择本项目目录：`video-transcript-clipper`
+5. 打开扩展设置页，配置 API。
+
+Chrome 和 Edge 的使用方式基本一致，后续配置 API、采集、导出 Markdown、导入 Obsidian 的流程相同。
+
 ## API 配置
 
 ### 阿里百炼 DashScope

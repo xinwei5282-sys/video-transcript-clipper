@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "视频文案采集器",
   "description": "在抖音和小红书视频页面采集真实视频地址，调用自定义 API 转写并导出 Markdown。",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "permissions": [
     "activeTab",
     "declarativeNetRequestWithHostAccess",

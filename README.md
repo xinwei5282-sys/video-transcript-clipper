@@ -7,6 +7,7 @@
 - 支持抖音视频文案转写
 - 支持小红书视频文案转写
 - 支持阿里百炼 DashScope Paraformer
+- 支持火山引擎/豆包语音、腾讯云 ASR、OpenAI Audio、Deepgram、AssemblyAI
 - 支持自定义转写 API
 - 支持下载 Markdown
 - 支持复制 Markdown
@@ -57,9 +58,234 @@ paraformer-v2
 
 API Key 只保存在用户本机浏览器的 `chrome.storage.local` 中。
 
-### 自定义 API
+### 其他内置转写服务
 
-自定义 API 需要支持：
+设置页可以直接选择以下服务：
+
+- 阿里百炼 Paraformer（推荐）：适合抖音防盗链场景，插件会先上传到 DashScope 文件存储再转写。
+- 火山引擎/豆包语音（推荐）：新版控制台只填豆包语音 ASR 的 `X-Api-Key`，`App ID` 留空；旧版控制台 `App ID` 填 `X-Api-App-Key`，`API Key` 填 `X-Api-Access-Key`。火山方舟/大模型推理 API Key 不能用于豆包语音 ASR。模型填资源 ID，推荐 `volc.bigasr.auc_turbo`。
+- 腾讯云 ASR：`API Key` 填 `SecretId`，`API Secret` 填 `SecretKey`，模型默认 `16k_zh`。
+- OpenAI Audio：`API Key` 填 OpenAI API Key，模型默认 `gpt-4o-mini-transcribe`。
+- Deepgram：`API Key` 填 Deepgram API Key，模型默认 `nova-3`。
+- AssemblyAI：`API Key` 填 AssemblyAI API Key。
+
+平台和上传方式：
+
+- 小红书：通常提取到的是公开可访问 URL，插件会把 URL 直接提交给火山、腾讯、Deepgram、AssemblyAI 等厂商。
+- 抖音：插件会优先提取 `media-audio` 音频地址，并在浏览器内下载音频。阿里百炼会上传到 DashScope 文件存储；火山会用极速版 `audio.data` 上传 base64；腾讯会用 `SourceType=1` 上传 base64；OpenAI 会用 multipart 上传文件。
+- Deepgram 和 AssemblyAI 当前只接入了公开 URL 模式，适合小红书，不适合抖音防盗链 URL。若要支持抖音，需要先把音频上传到可公开访问的对象存储。
+
+主要限制：
+
+- 阿里百炼：抖音会先上传到 DashScope 文件存储，适合防盗链场景。
+- 火山引擎：小红书公开 URL 和抖音下载上传都走极速版 `recognize/flash`。推荐资源 ID `volc.bigasr.auc_turbo`，音频不超过 100MB，官方建议上传二进制流尽量 20MB 内；需要开通对应资源 ID 权限。
+- 腾讯云：抖音本地音频上传不超过 5MB；超过 5MB 需要先上传到腾讯 COS，再用 COS URL 创建识别任务。
+- OpenAI Audio：浏览器下载后上传，单文件不超过 25MB。
+- Deepgram / AssemblyAI：当前插件只传公开 URL。
+
+## 详细配置教程
+
+### 阿里百炼 Paraformer
+
+适合场景：想省心使用，尤其是抖音防盗链视频。插件已经内置“下载抖音音频 -> 上传 DashScope 文件存储 -> 提交 Paraformer 转写”的完整流程。
+
+控制台入口：
+
+- 阿里云百炼控制台：<https://bailian.console.aliyun.com/>
+- DashScope 文档：<https://help.aliyun.com/zh/model-studio/>
+- 获取 DashScope API Key
+- 确认账号已开通音频转写和文件服务能力
+
+插件填写：
+
+```text
+接口类型：阿里百炼 Paraformer
+API Key：DashScope API Key
+模型：paraformer-v2
+App ID：不填
+API Secret：不填
+自定义 API 地址：不填
+```
+
+插件调用方式：
+
+- 小红书：直接提交公开视频 URL 给 DashScope 转写。
+- 抖音：浏览器先下载音频，再上传到 DashScope 文件存储，然后提交转写。
+
+常见问题：
+
+- `401/403`：API Key 错误、服务未开通、额度不足或账号权限不足。
+- 文件上传失败：检查 DashScope 文件服务是否可用，或视频音频是否超过插件限制。
+
+### 火山引擎 / 豆包语音
+
+适合场景：测试豆包语音识别大模型。推荐先用短音频测试。
+
+控制台入口：
+
+- 火山引擎控制台：<https://console.volcengine.com/>
+- 豆包语音文档：<https://www.volcengine.com/docs/6561>
+- 极速版 API 文档：<https://www.volcengine.com/docs/6561/1631584>
+- 进入路径：火山引擎控制台 -> 豆包语音
+- 不要使用火山方舟、大模型推理、OpenAI 兼容 API Key
+- 新版控制台找 `X-Api-Key`
+- 旧版控制台找 `X-Api-App-Key` 和 `X-Api-Access-Key`
+
+插件推荐填写：
+
+```text
+接口类型：火山引擎/豆包语音
+模型：volc.bigasr.auc_turbo
+```
+
+新版控制台：
+
+```text
+App ID：留空
+API Key：豆包语音 ASR 的 X-Api-Key
+```
+
+旧版控制台：
+
+```text
+App ID：X-Api-App-Key
+API Key：X-Api-Access-Key
+```
+
+插件调用方式：
+
+- 小红书：提交公开 URL 到极速版 `recognize/flash`。
+- 抖音：浏览器下载音频后，以 base64 方式上传到极速版 `recognize/flash`。
+
+限制：
+
+- 极速版音频不超过 2 小时、100MB。
+- 官方建议上传二进制流尽量 20MB 内，更容易稳定返回。
+- 需要开通 `volc.bigasr.auc_turbo` 资源权限。
+
+常见问题：
+
+- `Invalid X-Api-Key`：通常是填成了火山方舟 Key，或没有使用豆包语音 ASR 的 `X-Api-Key`。
+- 资源无权限：确认模型字段是 `volc.bigasr.auc_turbo`，并在豆包语音控制台开通对应资源。
+
+### 腾讯云 ASR
+
+适合场景：小红书公开视频 URL。抖音只适合音频小于 5MB 的短视频。
+
+控制台入口：
+
+- 腾讯云 ASR 控制台：<https://console.cloud.tencent.com/asr>
+- 产品文档：<https://cloud.tencent.com/document/product/1093>
+- 录音文件识别文档：<https://cloud.tencent.com/document/product/1093/37823>
+- 进入路径：腾讯云控制台 -> 语音识别 ASR
+- 开通“录音文件识别”
+- 在访问管理或 API 密钥页面获取 `SecretId` 和 `SecretKey`
+
+插件填写：
+
+```text
+接口类型：腾讯云 ASR
+API Key：SecretId
+API Secret：SecretKey
+模型：16k_zh
+App ID：不填
+自定义 API 地址：不填
+```
+
+插件调用方式：
+
+- 小红书：提交公开 URL 创建识别任务，然后轮询结果。
+- 抖音：浏览器下载音频后 base64 上传；超过 5MB 会直接提示不支持直传。
+
+限制：
+
+- URL 必须能被腾讯云服务器公网下载。
+- 本地音频上传 `Data` 方式不超过 5MB。
+- 超过 5MB 的抖音音频需要 COS 中转；本插件暂不做 COS 中转，因为这会增加配置复杂度。
+
+常见问题：
+
+- `Failed to download audio file`：腾讯云服务器拉不到小红书/视频 URL。
+- 鉴权失败：检查 `SecretId` / `SecretKey`，以及账号是否开通 ASR。
+
+### 自定义厂商模板
+
+没有服务器也可以接入一部分“简单 HTTP 转写接口”。设置页选择“自定义厂商模板”后，可以配置：
+
+- API 地址：厂商的转写接口 URL。
+- 鉴权方式：`Authorization: Bearer API_KEY`、自定义 Header，或不添加鉴权 Header。
+- 输入方式：公开视频 URL、浏览器下载后 base64、浏览器下载后 multipart 文件上传、旧版插件格式。
+- 字段名：URL 字段、base64 字段、文件字段、模型字段。
+- 返回文本字段路径：例如 `text`、`data.text`、`result.transcript`，多个路径用英文逗号分隔。
+
+适合的厂商接口：
+
+- 简单 `POST` 请求即可转写。
+- 鉴权只是 Bearer Token 或一个 API Key Header。
+- 返回 JSON 中有明确的文本字段。
+- 同步返回结果，或厂商接口自身在请求内完成转写。
+
+不适合的厂商接口：
+
+- 需要 HMAC/TC3/AK-SK 等复杂签名。
+- 需要“提交任务 -> 轮询任务 -> 下载结果”的复杂流程。
+- 需要回调地址。
+- 需要先上传到对象存储，比如 COS/OSS/S3。
+- 需要执行自定义脚本。
+
+这些复杂厂商应做成内置 provider，而不是用自定义模板硬配。
+
+自定义模板示例 1：提交公开视频 URL
+
+```http
+POST https://api.example.com/transcribe
+Authorization: Bearer YOUR_API_KEY
+Content-Type: application/json
+```
+
+设置：
+
+```text
+输入方式：提交公开视频 URL(JSON)
+URL 字段名：audio_url
+模型字段名：model
+返回文本字段路径：text,data.text
+```
+
+插件会发送：
+
+```json
+{
+  "audio_url": "https://example.com/audio.mp3",
+  "model": "your-model",
+  "sourceUrl": "https://example.com/page",
+  "platform": "xhs",
+  "durationSeconds": 120
+}
+```
+
+自定义模板示例 2：下载后 multipart 上传
+
+设置：
+
+```text
+输入方式：下载后 multipart 上传文件
+文件字段名：file
+模型字段名：model
+返回文本字段路径：text
+```
+
+插件会先在浏览器下载音频或视频，再以表单方式上传：
+
+```text
+file: 二进制文件
+model: your-model
+sourceUrl: 原页面地址
+platform: xhs 或 douyin
+durationSeconds: 视频时长
+```
+
+旧版插件格式仍然支持。选择“兼容旧版插件格式”时，请求体为：
 
 ```http
 POST your-api-url

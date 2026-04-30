@@ -14,8 +14,13 @@
     <label>
       接口类型
       <select id="provider">
-        <option value="dashscope">阿里百炼 Paraformer</option>
-        <option value="custom">自定义转写 API</option>
+        <option value="dashscope">阿里百炼 Paraformer（推荐）</option>
+        <option value="volcengine">火山引擎/豆包语音（推荐）</option>
+        <option value="tencent">腾讯云 ASR</option>
+        <option value="openai">OpenAI Audio</option>
+        <option value="deepgram">Deepgram</option>
+        <option value="assemblyai">AssemblyAI</option>
+        <option value="custom">自定义厂商模板</option>
       </select>
     </label>
 
@@ -24,15 +29,80 @@
       <input id="api-url" placeholder="https://example.com/transcribe">
     </label>
 
-    <label>
-      API Key
+    <label id="app-id-row">
+      App ID
+      <input id="app-id" placeholder="旧版填 X-Api-App-Key；新版 X-Api-Key 模式留空">
+    </label>
+
+    <label id="api-key-row">
+      <span id="api-key-label">API Key</span>
       <input id="api-key" type="password" placeholder="sk-...">
     </label>
 
-    <label>
-      模型
-      <input id="model" placeholder="paraformer-v2">
+    <label id="api-secret-row">
+      <span id="api-secret-label">API Secret</span>
+      <input id="api-secret" type="password" placeholder="仅部分厂商需要">
     </label>
+
+    <label id="model-row">
+      <span id="model-label">模型</span>
+      <input id="model" placeholder="paraformer-v2">
+      <span id="model-help" class="field-help"></span>
+    </label>
+
+    <section id="custom-template" class="panel">
+      <h2>自定义厂商模板</h2>
+      <p class="hint">适合简单 HTTP 转写接口，不需要服务器。复杂签名、复杂轮询、对象存储中转类厂商应使用内置 provider。</p>
+
+      <label>
+        鉴权方式
+        <select id="custom-auth-type">
+          <option value="bearer">Authorization: Bearer API_KEY</option>
+          <option value="header">自定义 Header: API_KEY</option>
+          <option value="none">不添加鉴权 Header</option>
+        </select>
+      </label>
+
+      <label id="custom-auth-header-row">
+        鉴权 Header 名
+        <input id="custom-auth-header" placeholder="Authorization 或 x-api-key">
+      </label>
+
+      <label>
+        输入方式
+        <select id="custom-input-mode">
+          <option value="url">提交公开视频 URL(JSON)</option>
+          <option value="base64">下载后提交 base64(JSON)</option>
+          <option value="multipart">下载后 multipart 上传文件</option>
+          <option value="legacy">兼容旧版插件格式</option>
+        </select>
+      </label>
+
+      <label id="custom-url-field-row">
+        URL 字段名
+        <input id="custom-url-field" placeholder="audio_url">
+      </label>
+
+      <label id="custom-base64-field-row">
+        base64 字段名
+        <input id="custom-base64-field" placeholder="audio_data">
+      </label>
+
+      <label id="custom-file-field-row">
+        文件字段名
+        <input id="custom-file-field" placeholder="file">
+      </label>
+
+      <label>
+        模型字段名
+        <input id="custom-model-field" placeholder="model">
+      </label>
+
+      <label>
+        返回文本字段路径
+        <input id="custom-response-path" placeholder="content,text,transcript,result,data.text">
+      </label>
+    </section>
 
     <label>
       Obsidian 文件名前缀
@@ -52,22 +122,80 @@
     <p id="status" class="status"></p>
 
     <section class="spec">
-      <h2>接口格式</h2>
-      <pre>阿里百炼模式：
-API地址无需填写，插件自动调用：
-https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription
+      <h2>配置教程</h2>
+      <pre>平台处理方式：
+小红书：通常提交公开视频 URL 给厂商转写。
+抖音：优先提取 media-audio，浏览器下载音频后再上传给支持该方式的厂商。
 
-自定义模式：
-POST API地址
-Authorization: Bearer API_KEY
-Content-Type: application/json
+一、阿里百炼 Paraformer
+适合：最省心，抖音防盗链场景更稳。
+控制台地址：https://bailian.console.aliyun.com/
+DashScope 文档：https://help.aliyun.com/zh/model-studio/
+需要开通：DashScope API Key、文件上传能力、Paraformer 音频转写。
+插件填写：
+  接口类型：阿里百炼 Paraformer
+  API Key：DashScope API Key
+  模型：paraformer-v2
+  App ID / API Secret / 自定义 API 地址：不用填
+插件调用：
+  小红书：直接提交视频 URL 给 DashScope 转写。
+  抖音：先下载音频，上传到 DashScope 文件存储，再提交转写。
+常见问题：
+  401/403：API Key 错误、额度不足、服务未开通。
+  文件上传失败：DashScope 文件服务权限或网络问题。
 
-{
-  "videoUrl": "...",
-  "sourceUrl": "...",
-  "platform": "xhs 或 douyin"
-}</pre>
-      <p>返回字段支持：<code>content</code>、<code>text</code>、<code>transcript</code>、<code>result</code>。</p>
+二、火山引擎 / 豆包语音
+适合：想测试豆包语音识别大模型，推荐先测短音频。
+控制台地址：https://console.volcengine.com/
+豆包语音文档：https://www.volcengine.com/docs/6561
+极速版 API 文档：https://www.volcengine.com/docs/6561/1631584
+进入路径：火山引擎控制台 -> 豆包语音，不是火山方舟。
+需要开通：豆包语音 ASR，资源 ID 推荐 volc.bigasr.auc_turbo。
+新版控制台填写：
+  接口类型：火山引擎/豆包语音
+  App ID：留空
+  API Key：豆包语音 ASR 的 X-Api-Key
+  模型：volc.bigasr.auc_turbo
+旧版控制台填写：
+  App ID：X-Api-App-Key
+  API Key：X-Api-Access-Key
+  模型：volc.bigasr.auc_turbo
+插件调用：
+  小红书：提交公开 URL 到极速版 recognize/flash。
+  抖音：下载音频后 base64 上传到极速版 recognize/flash。
+限制：
+  极速版音频不超过 2 小时、100MB，建议 20MB 内更稳。
+常见问题：
+  Invalid X-Api-Key：填成了火山方舟 Key，或没有用豆包语音 ASR 的 X-Api-Key。
+  资源无权限：没有开通 volc.bigasr.auc_turbo，或模型字段填错。
+
+三、腾讯云 ASR
+适合：小红书公开视频 URL；抖音只适合 5MB 内短音频。
+控制台地址：https://console.cloud.tencent.com/asr
+产品文档：https://cloud.tencent.com/document/product/1093
+录音文件识别文档：https://cloud.tencent.com/document/product/1093/37823
+进入路径：腾讯云控制台 -> 语音识别 ASR。
+需要开通：录音文件识别。
+插件填写：
+  接口类型：腾讯云 ASR
+  API Key：SecretId
+  API Secret：SecretKey
+  模型：16k_zh
+  App ID / 自定义 API 地址：不用填
+插件调用：
+  小红书：提交公开 URL 创建识别任务，然后轮询结果。
+  抖音：下载音频后 base64 上传；超过 5MB 会提示不支持直传。
+限制：
+  URL 音频需公网可下载；本地音频上传不超过 5MB。
+常见问题：
+  Failed to download audio file：腾讯云服务器拉不到视频 URL。
+  鉴权失败：SecretId/SecretKey 错误，或账号未开通 ASR。
+
+四、其他厂商和自定义模板
+OpenAI：浏览器下载后上传，单文件不超过 25MB。
+Deepgram / AssemblyAI：当前只提交公开 URL，适合小红书，不适合抖音防盗链 URL。
+自定义厂商模板：适合简单 HTTP POST 接口；不支持复杂签名、复杂轮询、回调、对象存储中转。</pre>
+      <p>API Key 只保存在本机浏览器。服务商额度、计费和可用地区以各自控制台为准。</p>
     </section>
   </main>
   <script src="lib/storage.js"></script>

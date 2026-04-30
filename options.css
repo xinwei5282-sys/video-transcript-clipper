@@ -22,10 +22,17 @@ h1 {
 
 .hint,
 .status,
-.spec p {
+.spec p,
+.field-help {
   color: #777;
   font-size: 13px;
   line-height: 1.6;
+}
+
+.field-help {
+  display: block;
+  margin-top: 6px;
+  font-weight: 400;
 }
 
 label {
@@ -79,12 +86,23 @@ button + button {
   background: #27231f;
 }
 
-.spec {
+.spec,
+.panel {
   margin-top: 28px;
   padding: 18px;
   border: 1px solid #ded6ca;
   border-radius: 14px;
   background: #fffaf3;
+}
+
+.panel {
+  margin-top: 18px;
+}
+
+.panel h2,
+.spec h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
 }
 
 pre {

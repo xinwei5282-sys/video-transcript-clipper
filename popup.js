@@ -18,6 +18,9 @@ let lastCollectDiagnostics = [];
 let currentCollectLog = null;
 let diagnosticsExpanded = false;
 const MAX_MEDIA_BLOB_BYTES = 100 * 1024 * 1024;
+const TENCENT_LOCAL_AUDIO_LIMIT_BYTES = 5 * 1024 * 1024;
+const OPENAI_AUDIO_LIMIT_BYTES = 25 * 1024 * 1024;
+const VOLCENGINE_FLASH_AUDIO_LIMIT_BYTES = 100 * 1024 * 1024;
 const README_URL = 'https://github.com/Yinmu/video-transcript-clipper#readme';
 
 function setStatus(text) {
@@ -46,7 +49,7 @@ function formatDiagnostics() {
 function safeJson(value) {
   try {
     return JSON.stringify(value, (key, item) => {
-      if (/apiKey|authorization|token|key/i.test(key)) return '[REDACTED]';
+      if (/apiKey|apiSecret|authorization|token|key|secret/i.test(key)) return '[REDACTED]';
       if (typeof item === 'string' && /^https?:\/\//i.test(item)) return redactUrl(item);
       if (item instanceof Error) return item.message;
       return item;
@@ -490,8 +493,106 @@ function extractContentFromResponse(data) {
   return '';
 }
 
+function getValueByPath(data, path) {
+  if (!path) return undefined;
+  return String(path).split('.').reduce((value, key) => {
+    if (value == null) return undefined;
+    if (/^\d+$/.test(key) && Array.isArray(value)) return value[Number(key)];
+    return value[key];
+  }, data);
+}
+
+function extractContentByPaths(data, paths) {
+  const pathList = String(paths || '').split(',').map(item => item.trim()).filter(Boolean);
+  for (const path of pathList) {
+    const value = getValueByPath(data, path);
+    if (typeof value === 'string' && value.trim()) return value.trim();
+    if (value != null && typeof value !== 'object') return String(value).trim();
+  }
+  return extractContentFromResponse(data).trim();
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function createRequestId() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function getProviderModel(config, fallback) {
+  const model = String(config.model || '').trim();
+  if (!model || (model === 'paraformer-v2' && fallback !== 'paraformer-v2')) return fallback;
+  return model;
+}
+
+function getCustomModel(config) {
+  const model = String(config.model || '').trim();
+  return model && model !== 'paraformer-v2' ? model : '';
+}
+
+function isVolcengineNewApiKeyMode(config) {
+  return !config.appId && Boolean(config.apiKey);
+}
+
+function buildVolcengineError(status, text) {
+  let message = text;
+  try {
+    const data = JSON.parse(text);
+    message = data?.header?.message || data?.message || text;
+  } catch (error) {
+    message = text;
+  }
+  if (/Invalid X-Api-Key/i.test(message || text)) {
+    return `火山引擎鉴权失败：当前按新版 X-Api-Key 模式调用，但 API Key 无效。请确认填的是豆包语音控制台的 X-Api-Key；如果你拿到的是旧版 X-Api-App-Key 和 X-Api-Access-Key，请把 X-Api-App-Key 填到 App ID，X-Api-Access-Key 填到 API Key。`;
+  }
+  return `火山极速版转写失败：${status} ${String(text || '').slice(0, 300)}`;
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const value = String(reader.result || '');
+      resolve(value.includes(',') ? value.split(',').pop() : value);
+    };
+    reader.onerror = () => reject(reader.error || new Error('读取音频文件失败'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function textEncoderBytes(text) {
+  return new TextEncoder().encode(text);
+}
+
+function bytesToHex(buffer) {
+  return [...new Uint8Array(buffer)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function sha256Hex(text) {
+  return bytesToHex(await crypto.subtle.digest('SHA-256', textEncoderBytes(text)));
+}
+
+async function hmacSha256(key, text) {
+  const cryptoKey = await crypto.subtle.importKey('raw', typeof key === 'string' ? textEncoderBytes(key) : key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return crypto.subtle.sign('HMAC', cryptoKey, textEncoderBytes(text));
+}
+
+async function hmacSha256Hex(key, text) {
+  return bytesToHex(await hmacSha256(key, text));
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, options);
+  const text = await response.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch (error) {
+    data = text;
+  }
+  return { response, text, data };
 }
 
 function normalizePageUrl(url) {
@@ -906,10 +1007,408 @@ async function transcribeWithDashScope(config, payload) {
   return submitDashScopeTranscription(config, payload.videoUrl);
 }
 
+async function transcribeWithOpenAI(config, payload) {
+  setStatus('正在下载媒体文件并提交到 OpenAI...');
+  const blob = await downloadMediaBlob(payload.videoUrl, payload.sourceUrl);
+  if (blob.size > OPENAI_AUDIO_LIMIT_BYTES) {
+    throw new Error(`OpenAI Audio 单文件限制 25MB，当前约 ${Math.ceil(blob.size / 1024 / 1024)}MB`);
+  }
+
+  const extension = blob.type.includes('audio') ? 'm4a' : 'mp4';
+  const form = new FormData();
+  form.append('file', blob, `${payload.platform || 'video'}-${Date.now()}.${extension}`);
+  form.append('model', getProviderModel(config, 'gpt-4o-mini-transcribe'));
+
+  const { response, text, data } = await fetchJson('https://api.openai.com/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${config.apiKey}` },
+    body: form,
+  });
+  addLog('openai.transcribe.response', { ok: response.ok, status: response.status, text: truncateText(text) });
+  if (!response.ok) throw new Error(`OpenAI 转写失败：${response.status} ${text.slice(0, 300)}`);
+  const content = extractContentFromResponse(data).trim();
+  if (!content) throw new Error('OpenAI 未返回 text');
+  return content;
+}
+
+async function transcribeWithDeepgram(config, payload) {
+  setStatus('正在提交到 Deepgram...');
+  const model = encodeURIComponent(getProviderModel(config, 'nova-3'));
+  const { response, text, data } = await fetchJson(`https://api.deepgram.com/v1/listen?model=${model}&smart_format=true&punctuate=true&detect_language=true`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Token ${config.apiKey}`,
+    },
+    body: JSON.stringify({ url: payload.videoUrl }),
+  });
+  addLog('deepgram.transcribe.response', { ok: response.ok, status: response.status, text: truncateText(text) });
+  if (!response.ok) throw new Error(`Deepgram 转写失败：${response.status} ${text.slice(0, 300)}`);
+  const content = data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || extractContentFromResponse(data);
+  if (!content?.trim()) throw new Error('Deepgram 未返回 transcript');
+  return content.trim();
+}
+
+async function transcribeWithAssemblyAI(config, payload) {
+  setStatus('正在提交到 AssemblyAI...');
+  const submit = await fetchJson('https://api.assemblyai.com/v2/transcript', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: config.apiKey,
+    },
+    body: JSON.stringify({
+      audio_url: payload.videoUrl,
+      language_detection: true,
+      punctuate: true,
+      format_text: true,
+    }),
+  });
+  addLog('assemblyai.submit.response', { ok: submit.response.ok, status: submit.response.status, text: truncateText(submit.text) });
+  if (!submit.response.ok) throw new Error(`AssemblyAI 提交失败：${submit.response.status} ${submit.text.slice(0, 300)}`);
+  const transcriptId = submit.data?.id;
+  if (!transcriptId) throw new Error('AssemblyAI 未返回 transcript id');
+
+  for (let i = 0; i < 80; i++) {
+    await sleep(3000);
+    setStatus(`AssemblyAI 转写中... ${i + 1}`);
+    const poll = await fetchJson(`https://api.assemblyai.com/v2/transcript/${encodeURIComponent(transcriptId)}`, {
+      headers: { Authorization: config.apiKey },
+    });
+    addLog('assemblyai.poll.response', { index: i + 1, ok: poll.response.ok, status: poll.response.status, text: truncateText(poll.text) });
+    if (!poll.response.ok) throw new Error(`AssemblyAI 查询失败：${poll.response.status} ${poll.text.slice(0, 300)}`);
+    if (poll.data?.status === 'error') throw new Error(poll.data?.error || 'AssemblyAI 转写失败');
+    if (poll.data?.status === 'completed') {
+      const content = poll.data?.text || extractContentFromResponse(poll.data);
+      if (!content?.trim()) throw new Error('AssemblyAI 未返回 text');
+      return content.trim();
+    }
+  }
+  throw new Error('AssemblyAI 转写超时');
+}
+
+function extractVolcTranscript(data) {
+  const candidates = [
+    data?.result?.text,
+    data?.result?.utterances,
+    data?.result?.results,
+    data?.data?.result?.text,
+    data?.data?.utterances,
+    data?.utterances,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+    if (Array.isArray(candidate)) {
+      const text = candidate.map(item => item.text || item.result || item.words || '').join('');
+      if (text.trim()) return text.trim();
+    }
+  }
+  return extractContentFromResponse(data).trim();
+}
+
+async function transcribeWithVolcengineFlash(config, payload, blob) {
+  const resourceId = getProviderModel(config, 'volc.bigasr.auc_turbo');
+  if (blob.size > VOLCENGINE_FLASH_AUDIO_LIMIT_BYTES) {
+    throw new Error(`火山极速版单文件限制 100MB，当前约 ${Math.ceil(blob.size / 1024 / 1024)}MB`);
+  }
+  setStatus('正在上传音频到火山引擎极速版...');
+  const audioData = await blobToBase64(blob);
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-Api-Resource-Id': resourceId,
+    'X-Api-Request-Id': createRequestId(),
+    'X-Api-Sequence': '-1',
+  };
+  if (isVolcengineNewApiKeyMode(config)) {
+    headers['X-Api-Key'] = config.apiKey;
+  } else {
+    headers['X-Api-App-Key'] = config.appId;
+    headers['X-Api-Access-Key'] = config.apiKey;
+  }
+  const body = {
+    user: { uid: config.appId || 'video-transcript-clipper' },
+    audio: {
+      data: audioData,
+      format: blob.type.includes('mp4') ? 'mp4' : blob.type.includes('mpeg') ? 'mp3' : blob.type.includes('wav') ? 'wav' : 'm4a',
+    },
+    request: {
+      model_name: 'bigmodel',
+      enable_itn: true,
+      enable_punc: true,
+      enable_speaker_info: false,
+    },
+  };
+  const result = await fetchJson('https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  });
+  addLog('volcengine.flash.response', { ok: result.response.ok, status: result.response.status, text: truncateText(result.text) });
+  if (!result.response.ok) throw new Error(buildVolcengineError(result.response.status, result.text));
+  const content = extractVolcTranscript(result.data);
+  if (!content) throw new Error('火山极速版未返回转写文本');
+  return content;
+}
+
+async function transcribeWithVolcengineUrl(config, payload) {
+  setStatus('正在提交到火山引擎极速版...');
+  const resourceId = getProviderModel(config, 'volc.bigasr.auc_turbo');
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-Api-Resource-Id': resourceId,
+    'X-Api-Request-Id': createRequestId(),
+    'X-Api-Sequence': '-1',
+  };
+  if (isVolcengineNewApiKeyMode(config)) {
+    headers['X-Api-Key'] = config.apiKey;
+  } else {
+    headers['X-Api-App-Key'] = config.appId;
+    headers['X-Api-Access-Key'] = config.apiKey;
+  }
+  const body = {
+    user: { uid: config.appId || 'video-transcript-clipper' },
+    audio: { url: payload.videoUrl },
+    request: {
+      model_name: 'bigmodel',
+      enable_itn: true,
+      enable_punc: true,
+      enable_speaker_info: false,
+    },
+  };
+  const result = await fetchJson('https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  });
+  addLog('volcengine.flash_url.response', { ok: result.response.ok, status: result.response.status, text: truncateText(result.text) });
+  if (!result.response.ok) throw new Error(buildVolcengineError(result.response.status, result.text));
+  const content = extractVolcTranscript(result.data);
+  if (!content) throw new Error('火山极速版未返回转写文本');
+  return content;
+}
+
+async function transcribeWithVolcengine(config, payload) {
+  if (payload.platform === 'douyin') {
+    setStatus('抖音音频需要先下载再上传到火山引擎...');
+    const blob = await downloadMediaBlob(payload.videoUrl, payload.sourceUrl);
+    return transcribeWithVolcengineFlash(config, payload, blob);
+  }
+  return transcribeWithVolcengineUrl(config, payload);
+}
+
+async function fetchTencentAsr(config, action, payload) {
+  const host = 'asr.tencentcloudapi.com';
+  const service = 'asr';
+  const version = '2019-06-14';
+  const region = 'ap-shanghai';
+  const timestamp = Math.floor(Date.now() / 1000);
+  const date = new Date(timestamp * 1000).toISOString().slice(0, 10);
+  const body = JSON.stringify(payload);
+  const hashedPayload = await sha256Hex(body);
+  const canonicalRequest = [
+    'POST',
+    '/',
+    '',
+    `content-type:application/json; charset=utf-8\nhost:${host}\n`,
+    'content-type;host',
+    hashedPayload,
+  ].join('\n');
+  const credentialScope = `${date}/${service}/tc3_request`;
+  const stringToSign = [
+    'TC3-HMAC-SHA256',
+    String(timestamp),
+    credentialScope,
+    await sha256Hex(canonicalRequest),
+  ].join('\n');
+  const secretDate = await hmacSha256(`TC3${config.apiSecret}`, date);
+  const secretService = await hmacSha256(secretDate, service);
+  const secretSigning = await hmacSha256(secretService, 'tc3_request');
+  const signature = await hmacSha256Hex(secretSigning, stringToSign);
+  const authorization = `TC3-HMAC-SHA256 Credential=${config.apiKey}/${credentialScope}, SignedHeaders=content-type;host, Signature=${signature}`;
+
+  return fetchJson(`https://${host}`, {
+    method: 'POST',
+    headers: {
+      Authorization: authorization,
+      'Content-Type': 'application/json; charset=utf-8',
+      'X-TC-Action': action,
+      'X-TC-Timestamp': String(timestamp),
+      'X-TC-Version': version,
+      'X-TC-Region': region,
+    },
+    body,
+  });
+}
+
+function extractTencentTranscript(data) {
+  const result = data?.Response?.Data?.Result || data?.Response?.Result || data?.Result;
+  if (typeof result === 'string') return result.trim();
+  if (Array.isArray(result)) {
+    const text = result.map(item => item.FinalSentence || item.SliceSentence || item.Text || '').join('');
+    if (text.trim()) return text.trim();
+  }
+  const detail = data?.Response?.Data?.ResultDetail || data?.Response?.ResultDetail || data?.ResultDetail;
+  return detail?.map?.(item => item.FinalSentence || item.SliceSentence || '').join('').trim() || '';
+}
+
+async function transcribeWithTencent(config, payload) {
+  setStatus('正在提交到腾讯云 ASR...');
+  const requestBody = {
+    EngineModelType: getProviderModel(config, '16k_zh'),
+    ChannelNum: 1,
+    ResTextFormat: 0,
+  };
+
+  if (payload.platform === 'douyin') {
+    setStatus('抖音音频需要先下载再上传到腾讯云 ASR...');
+    const blob = await downloadMediaBlob(payload.videoUrl, payload.sourceUrl);
+    if (blob.size > TENCENT_LOCAL_AUDIO_LIMIT_BYTES) {
+      throw new Error(`腾讯云本地音频上传限制 5MB，当前约 ${Math.ceil(blob.size / 1024 / 1024)}MB。请改用小红书公开 URL、腾讯 COS 中转，或使用阿里百炼/火山/OpenAI。`);
+    }
+    requestBody.SourceType = 1;
+    requestBody.Data = await blobToBase64(blob);
+    requestBody.DataLen = blob.size;
+  } else {
+    requestBody.SourceType = 0;
+    requestBody.Url = payload.videoUrl;
+  }
+
+  const submit = await fetchTencentAsr(config, 'CreateRecTask', requestBody);
+  addLog('tencent.submit.response', { ok: submit.response.ok, status: submit.response.status, text: truncateText(submit.text) });
+  if (!submit.response.ok || submit.data?.Response?.Error) {
+    throw new Error(submit.data?.Response?.Error?.Message || `腾讯云提交失败：${submit.response.status} ${submit.text.slice(0, 300)}`);
+  }
+  const taskId = submit.data?.Response?.Data?.TaskId || submit.data?.Response?.TaskId;
+  if (!taskId) throw new Error('腾讯云未返回 TaskId');
+
+  for (let i = 0; i < 80; i++) {
+    await sleep(3000);
+    setStatus(`腾讯云 ASR 转写中... ${i + 1}`);
+    const poll = await fetchTencentAsr(config, 'DescribeTaskStatus', { TaskId: Number(taskId) });
+    addLog('tencent.poll.response', { index: i + 1, ok: poll.response.ok, status: poll.response.status, text: truncateText(poll.text) });
+    if (!poll.response.ok || poll.data?.Response?.Error) {
+      throw new Error(poll.data?.Response?.Error?.Message || `腾讯云查询失败：${poll.response.status} ${poll.text.slice(0, 300)}`);
+    }
+    const status = Number(poll.data?.Response?.Data?.Status ?? poll.data?.Response?.Status);
+    if (status === 3) throw new Error(poll.data?.Response?.Data?.ErrorMsg || '腾讯云 ASR 转写失败');
+    const content = extractTencentTranscript(poll.data?.Response?.Data || poll.data);
+    if (status === 2 && content) return content;
+  }
+  throw new Error('腾讯云 ASR 转写超时');
+}
+
+function buildCustomHeaders(config, isJson) {
+  const headers = {};
+  if (isJson) headers['Content-Type'] = 'application/json';
+  if (config.customAuthType === 'none' || !config.apiKey) return headers;
+  if (config.customAuthType === 'header') {
+    headers[config.customAuthHeader || 'x-api-key'] = config.apiKey;
+    return headers;
+  }
+  headers.Authorization = `Bearer ${config.apiKey}`;
+  return headers;
+}
+
+function appendCustomCommonFields(target, config, payload) {
+  const model = getCustomModel(config);
+  if (config.customModelField && model) target[config.customModelField] = model;
+  target.sourceUrl = payload.sourceUrl;
+  target.platform = payload.platform;
+  if (payload.durationSeconds) target.durationSeconds = payload.durationSeconds;
+}
+
+async function transcribeWithCustomTemplate(config, payload) {
+  const mode = config.customInputMode || 'legacy';
+  const apiUrl = config.apiUrl;
+  let requestOptions = null;
+
+  if (mode === 'multipart') {
+    setStatus('正在下载媒体文件并上传到自定义厂商...');
+    const blob = await downloadMediaBlob(payload.videoUrl, payload.sourceUrl);
+    const form = new FormData();
+    const extension = blob.type.includes('audio') ? 'm4a' : 'mp4';
+    form.append(config.customFileField || 'file', blob, `${payload.platform || 'video'}-${Date.now()}.${extension}`);
+    const model = getCustomModel(config);
+    if (config.customModelField && model) form.append(config.customModelField, model);
+    form.append('sourceUrl', payload.sourceUrl || '');
+    form.append('platform', payload.platform || '');
+    if (payload.durationSeconds) form.append('durationSeconds', String(payload.durationSeconds));
+    requestOptions = {
+      method: 'POST',
+      headers: buildCustomHeaders(config, false),
+      body: form,
+    };
+  } else {
+    const body = {};
+    if (mode === 'base64') {
+      setStatus('正在下载媒体文件并提交 base64 到自定义厂商...');
+      const blob = await downloadMediaBlob(payload.videoUrl, payload.sourceUrl);
+      body[config.customBase64Field || 'audio_data'] = await blobToBase64(blob);
+      body.mimeType = blob.type || 'application/octet-stream';
+      body.size = blob.size;
+    } else if (mode === 'url') {
+      body[config.customUrlField || 'audio_url'] = payload.videoUrl;
+    } else {
+      body.videoUrl = payload.videoUrl;
+    }
+    if (mode !== 'legacy') {
+      appendCustomCommonFields(body, config, payload);
+    } else {
+      body.sourceUrl = payload.sourceUrl;
+      body.platform = payload.platform;
+      body.durationSeconds = payload.durationSeconds || 0;
+      const model = getCustomModel(config);
+      if (model) body.model = model;
+    }
+    requestOptions = {
+      method: 'POST',
+      headers: buildCustomHeaders(config, true),
+      body: JSON.stringify(body),
+    };
+  }
+
+  const { response, text, data } = await fetchJson(apiUrl, requestOptions);
+  addLog('custom.response', {
+    mode,
+    ok: response.ok,
+    status: response.status,
+    text: truncateText(text),
+  });
+
+  if (!response.ok) {
+    const message = typeof data === 'object' ? (data.error || data.message) : data;
+    throw new Error(message || `自定义厂商返回 ${response.status}`);
+  }
+
+  const content = extractContentByPaths(data, config.customResponsePath);
+  if (!content) throw new Error('自定义厂商没有返回可识别的文本字段');
+  return content;
+}
+
+function customApiOriginPattern(apiUrl) {
+  try {
+    const parsed = new URL(apiUrl);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+    return `${parsed.origin}/*`;
+  } catch (error) {
+    return '';
+  }
+}
+
+async function ensureCustomHostPermission(config) {
+  if (config.provider !== 'custom' || !chrome.permissions?.contains || !chrome.permissions?.request) return;
+  const origin = customApiOriginPattern(config.apiUrl);
+  if (!origin) return;
+  const alreadyGranted = await chrome.permissions.contains({ origins: [origin] });
+  if (alreadyGranted) return;
+  const granted = await chrome.permissions.request({ origins: [origin] });
+  if (!granted) throw new Error(`未授权访问自定义厂商域名：${origin}`);
+}
+
 async function callTranscribeApi(config, payload) {
   addLog('transcribe.start', {
     provider: config.provider,
-    apiUrl: config.provider === 'custom' ? config.apiUrl : 'dashscope',
+    apiUrl: config.provider === 'custom' ? config.apiUrl : config.provider,
     model: config.model,
     payload,
   });
@@ -917,37 +1416,25 @@ async function callTranscribeApi(config, payload) {
   if (config.provider === 'dashscope') {
     return transcribeWithDashScope(config, payload);
   }
-
-  const response = await fetch(config.apiUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.apiKey}`,
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const text = await response.text();
-  addLog('custom.response', {
-    ok: response.ok,
-    status: response.status,
-    text: truncateText(text),
-  });
-  let data = null;
-  try {
-    data = text ? JSON.parse(text) : {};
-  } catch (error) {
-    data = text;
+  if (config.provider === 'volcengine') {
+    return transcribeWithVolcengine(config, payload);
+  }
+  if (config.provider === 'tencent') {
+    if (!config.apiSecret) throw new Error('请先在设置页填写腾讯云 SecretKey');
+    return transcribeWithTencent(config, payload);
+  }
+  if (config.provider === 'openai') {
+    return transcribeWithOpenAI(config, payload);
+  }
+  if (config.provider === 'deepgram') {
+    return transcribeWithDeepgram(config, payload);
+  }
+  if (config.provider === 'assemblyai') {
+    return transcribeWithAssemblyAI(config, payload);
   }
 
-  if (!response.ok) {
-    const message = typeof data === 'object' ? (data.error || data.message) : data;
-    throw new Error(message || `转写接口返回 ${response.status}`);
-  }
-
-  const content = extractContentFromResponse(data).trim();
-  if (!content) throw new Error('转写接口没有返回 content/text/transcript/result');
-  return content;
+  await ensureCustomHostPermission(config);
+  return transcribeWithCustomTemplate(config, payload);
 }
 
 function saveLatest(transcript) {
@@ -980,9 +1467,14 @@ collectButton.addEventListener('click', async () => {
   resetDiagnostics();
   try {
     const config = await getConfig();
-    if (!config.apiKey || (config.provider === 'custom' && !config.apiUrl)) {
+    const needsApiKey = config.provider !== 'custom' || config.customAuthType !== 'none';
+    if ((needsApiKey && !config.apiKey) || (config.provider === 'custom' && !config.apiUrl)) {
       chrome.runtime.openOptionsPage();
-      throw new Error(config.provider === 'custom' ? '请先配置 API 地址和 API Key' : '请先配置阿里百炼 API Key');
+      throw new Error(config.provider === 'custom' ? '请先配置 API 地址和鉴权信息' : '请先配置 API Key/Access Key');
+    }
+    if (config.provider === 'tencent' && !config.apiSecret) {
+      chrome.runtime.openOptionsPage();
+      throw new Error('请先配置腾讯云 SecretKey');
     }
 
     const tab = await getActiveTab();
@@ -994,7 +1486,7 @@ collectButton.addEventListener('click', async () => {
       platform,
       provider: config.provider,
       model: config.model,
-      apiUrl: config.provider === 'custom' ? config.apiUrl : 'dashscope',
+      apiUrl: config.provider === 'custom' ? config.apiUrl : config.provider,
     });
 
     setStatus('正在读取页面监听缓存...');

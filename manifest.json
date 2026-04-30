@@ -15,12 +15,21 @@
     "https://*.douyin.com/*",
     "https://*.iesdouyin.com/*",
     "https://dashscope.aliyuncs.com/*",
+    "https://openspeech.bytedance.com/*",
+    "https://asr.tencentcloudapi.com/*",
+    "https://api.openai.com/*",
+    "https://api.deepgram.com/*",
+    "https://api.assemblyai.com/*",
     "https://*.xhscdn.com/*",
     "https://*.xiaohongshu.com/*",
     "https://*.douyinvod.com/*",
     "https://*.bytecdn.com/*",
     "https://*.ixigua.com/*",
     "https://*.zjcdn.com/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
   ],
   "action": {
     "default_title": "视频文案采集器",

@@ -7,6 +7,7 @@ const helpButton = document.getElementById('help-btn');
 const copyLogButton = document.getElementById('copy-log-btn');
 const clearLogButton = document.getElementById('clear-log-btn');
 const toggleLogButton = document.getElementById('toggle-log-btn');
+const shareUrlInput = document.getElementById('share-url-input');
 const resultBox = document.getElementById('result-box');
 const resultOutput = document.getElementById('result-output');
 const diagnosticsBox = document.getElementById('diagnostics-box');
@@ -29,6 +30,7 @@ function setStatus(text) {
 
 function resetDiagnostics() {
   lastCollectDiagnostics = [];
+  currentCollectLog = null;
   diagnosticsOutput.value = '';
   diagnosticsBox.style.display = 'none';
   diagnosticsExpanded = false;
@@ -171,6 +173,108 @@ async function getActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) throw new Error('找不到当前标签页');
   return tab;
+}
+
+function extractShareUrl(text) {
+  const normalized = String(text || '')
+    .replace(/&amp;/g, '&')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .trim();
+  const matches = normalized.match(/https?:\/\/[^\s"'<>）)】]+/g) || [];
+  for (const match of matches) {
+    const clean = match.replace(/[，。,.、]+$/g, '');
+    if (detectPlatform(clean)) return clean;
+  }
+  return matches[0]?.replace(/[，。,.、]+$/g, '') || '';
+}
+
+function samePageUrl(a, b) {
+  try {
+    const left = new URL(a);
+    const right = new URL(b);
+    left.hash = '';
+    right.hash = '';
+    return left.href === right.href;
+  } catch (error) {
+    return String(a || '').split('#')[0] === String(b || '').split('#')[0];
+  }
+}
+
+function isKnownShareShortLink(url) {
+  try {
+    const host = new URL(url).hostname;
+    return /(^|\.)xhslink\.com$/i.test(host) || /^v\.douyin\.com$/i.test(host);
+  } catch (error) {
+    return false;
+  }
+}
+
+function waitForTabAfterNavigation(tabId, expectedPlatform, timeoutMs = 30000) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const startedAt = Date.now();
+
+    const cleanup = () => {
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      clearInterval(timer);
+      clearTimeout(timeout);
+    };
+
+    const finish = (tab) => {
+      if (settled) return;
+      const platform = detectPlatform(tab?.url || '');
+      if (!platform || (expectedPlatform && platform !== expectedPlatform)) return;
+      if (isKnownShareShortLink(tab?.url || '')) return;
+      if (tab.status && tab.status !== 'complete' && Date.now() - startedAt < 1800) return;
+      settled = true;
+      cleanup();
+      resolve(tab);
+    };
+
+    const onUpdated = (updatedTabId, changeInfo, tab) => {
+      if (updatedTabId !== tabId) return;
+      if (changeInfo.url || changeInfo.status === 'complete') finish(tab);
+    };
+
+    const timer = setInterval(() => {
+      chrome.tabs.get(tabId).then(finish).catch(() => {});
+    }, 500);
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error('等待分享链接跳转超时，请确认链接能在浏览器中打开'));
+    }, timeoutMs);
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.get(tabId).then(finish).catch(() => {});
+  });
+}
+
+async function getCollectionTab(tab, shareUrl) {
+  if (!shareUrl) return tab;
+
+  const platform = detectPlatform(shareUrl);
+  if (!platform) throw new Error('粘贴内容里没有识别到抖音或小红书链接');
+
+  if (samePageUrl(tab.url, shareUrl) && detectPlatform(tab.url || '')) {
+    return tab;
+  }
+
+  setStatus('正在打开分享链接...');
+  addLog('share.navigate.start', {
+    fromUrl: tab.url,
+    shareUrl,
+    platform,
+  });
+  await chrome.tabs.update(tab.id, { url: shareUrl, active: true });
+  const loadedTab = await waitForTabAfterNavigation(tab.id, platform);
+  addLog('share.navigate.complete', {
+    finalUrl: loadedTab.url,
+    platform: detectPlatform(loadedTab.url || ''),
+  });
+  return loadedTab;
 }
 
 function runVideoExtractor(platform) {
@@ -1477,17 +1581,23 @@ collectButton.addEventListener('click', async () => {
       throw new Error('请先配置腾讯云 SecretKey');
     }
 
-    const tab = await getActiveTab();
-    const platform = detectPlatform(tab.url || '');
-    if (!platform) throw new Error('请先打开抖音或小红书视频页面');
+    const activeTab = await getActiveTab();
+    const shareUrl = extractShareUrl(shareUrlInput.value);
+    const initialPlatform = detectPlatform(shareUrl || activeTab.url || '');
+    if (!initialPlatform) throw new Error('请先打开抖音或小红书视频页面，或粘贴抖音/小红书分享链接');
     startCollectLog({
-      tabId: tab.id,
-      tabUrl: tab.url,
-      platform,
+      tabId: activeTab.id,
+      tabUrl: activeTab.url,
+      shareUrl,
+      platform: initialPlatform,
       provider: config.provider,
       model: config.model,
       apiUrl: config.provider === 'custom' ? config.apiUrl : config.provider,
     });
+
+    const tab = await getCollectionTab(activeTab, shareUrl);
+    const platform = detectPlatform(tab.url || '');
+    if (!platform) throw new Error('请先打开抖音或小红书视频页面');
 
     setStatus('正在读取页面监听缓存...');
     const pageCachedVideo = await getPageCachedVideoFromTab(tab, platform);

@@ -1,6 +1,7 @@
 const collectButton = document.getElementById('collect-btn');
 const downloadButton = document.getElementById('download-btn');
 const copyButton = document.getElementById('copy-btn');
+const summarizeButton = document.getElementById('summarize-btn');
 const obsidianButton = document.getElementById('obsidian-btn');
 const optionsButton = document.getElementById('options-btn');
 const helpButton = document.getElementById('help-btn');
@@ -1096,6 +1097,42 @@ async function uploadBlobToDashScopeFiles(config, blob, payload) {
   return fileUrl;
 }
 
+async function transcribeWithLocalWhisper(config, payload) {
+  const apiUrl = (config.apiUrl || 'http://127.0.0.1:8765/transcribe').trim();
+  const lang = (config.model || 'zh').trim() || 'zh';
+
+  const blob = await downloadMediaBlob(payload.videoUrl, payload.sourceUrl);
+
+  setStatus(`音频已下载(${(blob.size / 1024 / 1024).toFixed(1)} MB)，正在本地 Whisper 转写（首次较慢）...`);
+  const transcribeUrl = `${apiUrl}?lang=${encodeURIComponent(lang)}`;
+
+  let response, data;
+  try {
+    response = await fetch(transcribeUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': blob.type || 'application/octet-stream' },
+      body: blob,
+    });
+    data = await response.json();
+  } catch (error) {
+    throw new Error(`无法连接本地 Whisper 服务(${apiUrl})：${error.message}。先启动：python3 ~/projects/whisper-local-server/server.py`);
+  }
+
+  addLog('local-whisper.response', {
+    ok: response.ok,
+    status: response.status,
+    textLength: (data.text || '').length,
+  });
+
+  if (!response.ok) {
+    throw new Error(`本地 Whisper 转写失败 ${response.status}: ${data.error || JSON.stringify(data).slice(0, 300)}`);
+  }
+
+  const text = (data.text || '').trim();
+  if (!text) throw new Error('Whisper 返回空文字');
+  return text;
+}
+
 async function transcribeWithDashScope(config, payload) {
   if (payload.platform === 'douyin') {
     setStatus('抖音视频需要先下载并上传到 DashScope...');
@@ -1517,6 +1554,9 @@ async function callTranscribeApi(config, payload) {
     payload,
   });
 
+  if (config.provider === 'local-whisper') {
+    return transcribeWithLocalWhisper(config, payload);
+  }
   if (config.provider === 'dashscope') {
     return transcribeWithDashScope(config, payload);
   }
@@ -1571,14 +1611,21 @@ collectButton.addEventListener('click', async () => {
   resetDiagnostics();
   try {
     const config = await getConfig();
-    const needsApiKey = config.provider !== 'custom' || config.customAuthType !== 'none';
-    if ((needsApiKey && !config.apiKey) || (config.provider === 'custom' && !config.apiUrl)) {
-      chrome.runtime.openOptionsPage();
-      throw new Error(config.provider === 'custom' ? '请先配置 API 地址和鉴权信息' : '请先配置 API Key/Access Key');
-    }
-    if (config.provider === 'tencent' && !config.apiSecret) {
-      chrome.runtime.openOptionsPage();
-      throw new Error('请先配置腾讯云 SecretKey');
+    if (config.provider === 'local-whisper') {
+      if (!config.apiUrl) {
+        chrome.runtime.openOptionsPage();
+        throw new Error('请先在设置页确认本地 Whisper 服务地址');
+      }
+    } else {
+      const needsApiKey = config.provider !== 'custom' || config.customAuthType !== 'none';
+      if ((needsApiKey && !config.apiKey) || (config.provider === 'custom' && !config.apiUrl)) {
+        chrome.runtime.openOptionsPage();
+        throw new Error(config.provider === 'custom' ? '请先配置 API 地址和鉴权信息' : '请先配置 API Key/Access Key');
+      }
+      if (config.provider === 'tencent' && !config.apiSecret) {
+        chrome.runtime.openOptionsPage();
+        throw new Error('请先配置腾讯云 SecretKey');
+      }
     }
 
     const activeTab = await getActiveTab();
@@ -1642,12 +1689,25 @@ collectButton.addEventListener('click', async () => {
       durationSeconds: video.durationSeconds || 0,
     });
 
+    let pageMeta = null;
+    try {
+      const metaResp = await chrome.tabs.sendMessage(tab.id, {
+        type: 'GET_VIDEO_META',
+        pageUrl: tab.url,
+      });
+      pageMeta = metaResp?.meta || null;
+      addLog('meta.fetched', { hasMeta: Boolean(pageMeta), meta: pageMeta });
+    } catch (error) {
+      addLog('meta.error', { message: error.message || String(error) });
+    }
+
     const transcript = {
-      title: `${platformLabel(platform)}视频转写`,
+      title: pageMeta?.title || `${platformLabel(platform)}视频转写`,
       content,
       sourceUrl: video.pageUrl || tab.url,
       videoUrl: video.videoUrl,
       platform,
+      meta: pageMeta,
       updatedAt: Date.now(),
     };
     await saveLatest(transcript);
@@ -1699,6 +1759,44 @@ copyButton.addEventListener('click', async () => {
   try {
     await navigator.clipboard.writeText(getMarkdownOrThrow());
     setStatus('Markdown 已复制');
+  } catch (error) {
+    setStatus(error.message || '复制失败');
+  }
+});
+
+function buildSummaryRequest(transcript) {
+  const t = transcript;
+  const meta = t.meta || {};
+  const stats = meta.stats || {};
+  const fmt = v => (v == null || v === 0) ? '-' : (v >= 10000 ? `${(v/10000).toFixed(1)}w` : String(v));
+  const lines = [
+    `请帮我拆解这条${t.platform === 'douyin' ? '抖音' : '小红书'}视频,作为爆款选题参考。`,
+    '',
+    `**标题**:${t.title || '-'}`,
+    meta.author ? `**作者**:${meta.author}` : '',
+    `**数据**:点赞 ${fmt(stats.digg)} / 评论 ${fmt(stats.comment)} / 收藏 ${fmt(stats.collect)} / 分享 ${fmt(stats.share)}`,
+    `**链接**:${t.sourceUrl || ''}`,
+    '',
+    '**口播文案**:',
+    String(t.content || '').trim(),
+    '',
+    '---',
+    '请输出:',
+    '1. 这条视频的钩子(开头 3 秒抓人的点)',
+    '2. 内容结构(分了几段、每段做什么)',
+    '3. 情绪节奏(哪里高潮、哪里转折)',
+    '4. 可借鉴的句式/套路(我能复用到自己内容里的)',
+    '5. 一句话总结这条为什么爆',
+  ].filter(line => line !== '');
+  return lines.join('\n');
+}
+
+summarizeButton.addEventListener('click', async () => {
+  try {
+    if (!latestTranscript?.content) throw new Error('暂无转写结果,先采集');
+    const request = buildSummaryRequest(latestTranscript);
+    await navigator.clipboard.writeText(request);
+    setStatus('✓ 总结请求已复制,去飞书粘贴给 bot');
   } catch (error) {
     setStatus(error.message || '复制失败');
   }

@@ -37,7 +37,9 @@ function scoreCandidate(url, source) {
   if (/bitrate|bit_rate/i.test(sourceText)) score += 50;
   if (/watermark=0/i.test(url)) score += 80;
   if (/media-audio/i.test(url)) score += 120;
-  if (/media-audio/i.test(url) && /douyin/i.test(url)) score -= 90;
+  // 抖音视频流和音频流分开封装,纯视频流无音轨,whisper 转不了。
+  // 强制偏好 media-audio 而非 media-video。
+  if (/media-video/i.test(url) && /douyin/i.test(url)) score -= 300;
   if (/\.mp4(\?|$)/i.test(url)) score += 100;
   if (/\.m3u8(\?|$)/i.test(url)) score += 60;
   if (/\/stream\//i.test(url)) score += 50;
@@ -90,23 +92,78 @@ async function saveCandidate(payload) {
   await chrome.storage.local.set({ videoCandidateCache });
 }
 
+const META_CACHE_LIMIT = 20;
+
+function mergeMeta(prev = {}, next = {}) {
+  const merged = { ...prev, ...next };
+  if (prev.stats || next.stats) {
+    merged.stats = { ...(prev.stats || {}) };
+    Object.entries(next.stats || {}).forEach(([k, v]) => {
+      if (v != null) merged.stats[k] = v;
+    });
+  }
+  return merged;
+}
+
+async function saveMeta(payload) {
+  const meta = payload?.meta;
+  if (!meta || typeof meta !== 'object') return;
+  const pageUrl = normalizePageUrl(payload.pageUrl || location.href);
+  const platform = payload.platform || detectCachePlatform(pageUrl);
+
+  const { videoMetaCache = {} } = await chrome.storage.local.get(['videoMetaCache']);
+  const prev = videoMetaCache[pageUrl]?.meta || {};
+  videoMetaCache[pageUrl] = {
+    pageUrl,
+    platform,
+    updatedAt: Date.now(),
+    meta: mergeMeta(prev, meta),
+  };
+
+  Object.entries(videoMetaCache)
+    .sort((a, b) => Number(b[1]?.updatedAt || 0) - Number(a[1]?.updatedAt || 0))
+    .slice(META_CACHE_LIMIT)
+    .forEach(([key]) => {
+      delete videoMetaCache[key];
+    });
+
+  await chrome.storage.local.set({ videoMetaCache });
+}
+
 window.addEventListener('message', (event) => {
   if (event.source !== window) return;
-  if (event.data?.type !== 'VIDEO_TRANSCRIPT_CLIPPER_CANDIDATE') return;
-  saveCandidate(event.data.payload).catch(() => {});
+  const type = event.data?.type;
+  if (type === 'VIDEO_TRANSCRIPT_CLIPPER_CANDIDATE') {
+    saveCandidate(event.data.payload).catch(() => {});
+  } else if (type === 'VIDEO_TRANSCRIPT_CLIPPER_META') {
+    saveMeta(event.data.payload).catch(() => {});
+  }
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type !== 'GET_VIDEO_CANDIDATES') return false;
-
-  chrome.storage.local.get(['videoCandidateCache']).then(({ videoCandidateCache = {} }) => {
-    const pageUrl = normalizePageUrl(message.pageUrl || location.href);
-    sendResponse(videoCandidateCache[pageUrl] || {
-      pageUrl,
-      platform: detectCachePlatform(pageUrl),
-      candidates: [],
+  if (message?.type === 'GET_VIDEO_CANDIDATES') {
+    chrome.storage.local.get(['videoCandidateCache']).then(({ videoCandidateCache = {} }) => {
+      const pageUrl = normalizePageUrl(message.pageUrl || location.href);
+      sendResponse(videoCandidateCache[pageUrl] || {
+        pageUrl,
+        platform: detectCachePlatform(pageUrl),
+        candidates: [],
+      });
     });
-  });
+    return true;
+  }
 
-  return true;
+  if (message?.type === 'GET_VIDEO_META') {
+    chrome.storage.local.get(['videoMetaCache']).then(({ videoMetaCache = {} }) => {
+      const pageUrl = normalizePageUrl(message.pageUrl || location.href);
+      sendResponse(videoMetaCache[pageUrl] || {
+        pageUrl,
+        platform: detectCachePlatform(pageUrl),
+        meta: null,
+      });
+    });
+    return true;
+  }
+
+  return false;
 });

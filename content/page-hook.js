@@ -70,6 +70,43 @@
     }, '*');
   }
 
+  function publishMeta(meta) {
+    if (!meta || typeof meta !== 'object') return;
+    window.postMessage({
+      type: 'VIDEO_TRANSCRIPT_CLIPPER_META',
+      payload: {
+        platform: platform(),
+        pageUrl: location.href,
+        capturedAt: Date.now(),
+        meta,
+      },
+    }, '*');
+  }
+
+  function extractDouyinMeta(aweme) {
+    if (!aweme || typeof aweme !== 'object') return null;
+    const stats = aweme.statistics || {};
+    const author = aweme.author || {};
+    const meta = {
+      awemeId: aweme.aweme_id || aweme.awemeId || '',
+      title: (aweme.desc || aweme.item_title || '').trim(),
+      author: author.nickname || author.unique_id || '',
+      authorId: author.sec_uid || author.uid || '',
+      createTime: aweme.create_time || aweme.createTime || 0,
+      duration: (aweme.video && aweme.video.duration) || aweme.duration || 0,
+      stats: {
+        play: stats.play_count ?? null,
+        digg: stats.digg_count ?? null,
+        comment: stats.comment_count ?? null,
+        collect: stats.collect_count ?? null,
+        share: stats.share_count ?? null,
+        download: stats.download_count ?? null,
+      },
+    };
+    const hasAny = meta.title || meta.author || Object.values(meta.stats).some(v => v != null);
+    return hasAny ? meta : null;
+  }
+
   function extractDouyinApiUrls(data, source) {
     const urls = [];
 
@@ -113,6 +150,14 @@
       });
     }
 
+    function tryPublishMeta(node) {
+      if (!node || typeof node !== 'object') return;
+      if (node.aweme_id || node.awemeId || node.statistics || node.desc) {
+        const meta = extractDouyinMeta(node);
+        if (meta) publishMeta(meta);
+      }
+    }
+
     function walk(value, path, depth) {
       if (!value || depth > 8) return;
       if (Array.isArray(value)) {
@@ -120,6 +165,8 @@
         return;
       }
       if (typeof value !== 'object') return;
+
+      tryPublishMeta(value);
 
       if (value.video && typeof value.video === 'object') {
         collectVideo(value.video, `${path}.video`);
@@ -132,7 +179,7 @@
       }
 
       Object.entries(value).forEach(([key, child]) => {
-        if (!/aweme|detail|video|play|download|bit_rate|data/i.test(key)) return;
+        if (!/aweme|detail|video|play|download|bit_rate|data|statistics|author/i.test(key)) return;
         walk(child, `${path}.${key}`, depth + 1);
       });
     }
@@ -184,16 +231,15 @@
     } catch (error) {}
   }
 
-  function patchFetch() {
-    if (!window.fetch || window.fetch.__videoTranscriptClipperPatched) return;
-    const originalFetch = window.fetch;
-    const patchedFetch = function patchedFetch(input, init) {
+  function wrapFetch(rawFetch) {
+    if (!rawFetch || rawFetch.__videoTranscriptClipperPatched) return rawFetch;
+    const wrapped = function patchedFetch(input, init) {
       try {
         const url = typeof input === 'string' ? input : input?.url;
         publish(url, 'fetch-request');
       } catch (error) {}
 
-      return originalFetch.apply(this, arguments).then((response) => {
+      return rawFetch.apply(this, arguments).then((response) => {
         try {
           publish(response.url, 'fetch-response');
           const contentType = response.headers?.get?.('content-type') || '';
@@ -204,8 +250,31 @@
         return response;
       });
     };
-    patchedFetch.__videoTranscriptClipperPatched = true;
-    window.fetch = patchedFetch;
+    wrapped.__videoTranscriptClipperPatched = true;
+    wrapped.__videoTranscriptClipperRaw = rawFetch;
+    return wrapped;
+  }
+
+  function patchFetch() {
+    if (window.__videoTranscriptClipperFetchDefended) return;
+    if (!window.fetch) return;
+
+    let active = wrapFetch(window.fetch);
+    try {
+      Object.defineProperty(window, 'fetch', {
+        get() { return active; },
+        set(newFetch) {
+          // 任何外部赋值都立刻 re-wrap,保证 patched 状态永不丢失
+          active = wrapFetch(newFetch);
+        },
+        configurable: true,
+        enumerable: true,
+      });
+      window.__videoTranscriptClipperFetchDefended = true;
+    } catch (error) {
+      // defineProperty 失败(已被 freeze 等),回退到直接赋值
+      try { window.fetch = active; } catch (e) {}
+    }
   }
 
   function patchXhr() {
@@ -260,6 +329,14 @@
   patchXhr();
   patchCreateObjectUrl();
   scanDocument();
+
+  // Watchdog: 抖音 SPA 框架会重新赋值 window.fetch / XMLHttpRequest,把我们的 patch 覆盖掉。
+  // 每秒检查一次,被覆盖就重新 patch。
+  setInterval(() => {
+    if (!window.fetch?.__videoTranscriptClipperPatched) patchFetch();
+    if (!window.XMLHttpRequest?.__videoTranscriptClipperPatched) patchXhr();
+    if (!URL.createObjectURL?.__videoTranscriptClipperPatched) patchCreateObjectUrl();
+  }, 1000);
 
   const observer = new MutationObserver(() => {
     scanVideoElements();

@@ -22,6 +22,8 @@
     "https://api.openai.com/*",
     "https://api.deepgram.com/*",
     "https://api.assemblyai.com/*",
+    "http://127.0.0.1:8765/*",
+    "http://localhost:8765/*",
     "https://*.xhscdn.com/*",
     "https://*.xiaohongshu.com/*",
     "https://*.douyinvod.com/*",

@@ -37,16 +37,31 @@ function setStatus(text) {
 function syncProviderView() {
   const provider = providerInput.value;
   const isCustom = provider === 'custom';
+  const isLocalWhisper = provider === 'local-whisper';
   const needsAppId = provider === 'volcengine';
   const needsSecret = provider === 'tencent';
-  apiUrlRow.style.display = isCustom ? 'block' : 'none';
+  apiUrlRow.style.display = (isCustom || isLocalWhisper) ? 'block' : 'none';
   customTemplate.style.display = isCustom ? 'block' : 'none';
   appIdRow.style.display = needsAppId ? 'block' : 'none';
   apiSecretRow.style.display = needsSecret ? 'block' : 'none';
+  document.getElementById('api-key-row').style.display = isLocalWhisper ? 'none' : 'block';
   apiKeyLabel.textContent = provider === 'tencent' ? 'SecretId' : provider === 'volcengine' ? 'API Key / Access Key' : 'API Key';
   apiSecretLabel.textContent = provider === 'tencent' ? 'SecretKey' : 'API Secret';
 
+  if (isLocalWhisper) {
+    const apiUrlLabel = apiUrlRow.querySelector('label, span') || apiUrlRow.childNodes[0];
+    if (apiUrlInput.placeholder !== 'http://127.0.0.1:8765/transcribe') {
+      apiUrlInput.placeholder = 'http://127.0.0.1:8765/transcribe';
+    }
+    if (!apiUrlInput.value.trim()) {
+      apiUrlInput.value = 'http://127.0.0.1:8765/transcribe';
+    }
+  } else if (isCustom) {
+    apiUrlInput.placeholder = 'https://example.com/transcribe';
+  }
+
   const modelDefaults = {
+    'local-whisper': ['zh', '语言代码：zh(中文)/en(英文)/auto(自动)'],
     dashscope: ['paraformer-v2', '阿里百炼 Paraformer 模型名'],
     volcengine: ['volc.bigasr.auc_turbo', '火山极速版资源 ID，推荐 volc.bigasr.auc_turbo'],
     tencent: ['16k_zh', '腾讯 EngineModelType，例如 16k_zh'],
@@ -163,6 +178,25 @@ testButton.addEventListener('click', async () => {
     customModelField: customModelFieldInput.value.trim(),
     customResponsePath: customResponsePathInput.value.trim(),
   };
+  if (config.provider === 'local-whisper') {
+    const healthUrl = (config.apiUrl || 'http://127.0.0.1:8765/transcribe').replace(/\/transcribe.*$/, '/health');
+    setStatus('正在测试本地 Whisper 服务...');
+    try {
+      const resp = await fetch(healthUrl);
+      const data = await resp.json();
+      if (data.ok && data.model_exists) {
+        setStatus('✓ 本地 Whisper 服务已启动,模型已加载');
+      } else if (data.ok) {
+        setStatus('⚠️ 服务启动但模型文件不存在: ' + data.model);
+      } else {
+        setStatus('服务响应异常: ' + JSON.stringify(data));
+      }
+    } catch (error) {
+      setStatus('✗ 本地服务未启动 - 先跑 python3 ~/projects/whisper-local-server/server.py');
+    }
+    return;
+  }
+
   const needsApiKey = config.provider !== 'custom' || config.customAuthType !== 'none';
   if ((needsApiKey && !config.apiKey) || (config.provider === 'custom' && !config.apiUrl)) {
     setStatus(config.provider === 'custom' ? '请先填写 API 地址和鉴权信息' : '请先填写 API Key/Access Key');

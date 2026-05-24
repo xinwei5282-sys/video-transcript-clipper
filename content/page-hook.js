@@ -179,7 +179,8 @@
       }
 
       Object.entries(value).forEach(([key, child]) => {
-        if (!/aweme|detail|video|play|download|bit_rate|data|statistics|author/i.test(key)) return;
+        // 字段名宽松匹配,覆盖标准 video 页 + 精选(jingxuan)+ feed/list 等
+        if (!/aweme|detail|video|play|download|bit_rate|data|statistics|author|feed|item|list|jingxuan|single|content/i.test(key)) return;
         walk(child, `${path}.${key}`, depth + 1);
       });
     }

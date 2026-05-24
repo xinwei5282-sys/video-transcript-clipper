@@ -87,6 +87,46 @@ def split_wav(wav_path, tmpdir):
     return chunks, duration
 
 
+def dedupe_text(text):
+    """干掉 whisper 幻觉循环:连续相同的行/句子超过 2 次时只保留 1 次"""
+    if not text:
+        return text
+    # 1) 按行去重(行间是 \n)
+    lines = text.split("\n")
+    cleaned_lines = []
+    for line in lines:
+        # 同一行连续出现 >=2 次,只留 1 个
+        if cleaned_lines and cleaned_lines[-1].strip() == line.strip():
+            continue
+        cleaned_lines.append(line)
+    # 2) 按句号/逗号切短句,连续相同的短句去重
+    out_lines = []
+    for line in cleaned_lines:
+        if not line.strip():
+            out_lines.append(line)
+            continue
+        # 中文标点切分
+        import re
+        parts = re.split(r"([,。!?;])", line)
+        # 重组并去重相邻的重复短句
+        new_parts = []
+        last_sentence = ""
+        i = 0
+        while i < len(parts):
+            seg = parts[i]
+            punct = parts[i + 1] if i + 1 < len(parts) else ""
+            sentence = (seg + punct).strip()
+            if sentence and sentence == last_sentence:
+                i += 2
+                continue
+            if sentence:
+                new_parts.append(seg + punct)
+                last_sentence = sentence
+            i += 2
+        out_lines.append("".join(new_parts))
+    return "\n".join(out_lines).strip()
+
+
 def transcribe_one(wav_path, tmpdir, lang, tag=""):
     """转写单个 wav 文件,返回纯文字"""
     out_prefix = os.path.join(tmpdir, f"out_{tag or 'main'}")
@@ -295,8 +335,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self._json(500, {"error": str(e)})
                     return
 
-                # 拼接(段间用空行分隔,便于阅读;重叠部分会有少量重复)
+                # 拼接(段间用空行分隔,便于阅读;重叠部分会有少量重复)+ 后处理去重
                 text = "\n\n".join(t for t in texts if t).strip()
+                text = dedupe_text(text)
 
                 self._json(200, {
                     "text": text,

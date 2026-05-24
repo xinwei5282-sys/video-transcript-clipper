@@ -13,6 +13,9 @@ import os
 import socketserver
 import subprocess
 import tempfile
+import threading
+import time
+import uuid
 from urllib.parse import urlparse, parse_qs
 
 def pick_model():
@@ -36,6 +39,11 @@ PORT = 8765
 LONG_THRESHOLD_SEC = 300   # 超过 5 分钟才切
 SEGMENT_SEC = 300          # 每段 5 分钟
 OVERLAP_SEC = 5            # 段间 5 秒重叠(避免边界丢字,接受少量重复)
+
+# 飞书 clip 任务队列(内存,简单够用)
+CLIP_TASKS = {}            # task_id -> {url, status, markdown, error, created_at, updated_at}
+CLIP_LOCK = threading.Lock()
+CLIP_TASK_TTL_SEC = 3600   # 任务保留 1 小时后清理
 
 
 def get_audio_duration(wav_path):
@@ -131,11 +139,105 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "model": MODEL_PATH,
                 "model_exists": os.path.exists(MODEL_PATH),
             })
-        else:
-            self._json(404, {"error": "not found"})
+            return
+
+        # 扩展 polling:取最早一个 pending 任务
+        if path == "/clip/poll":
+            with CLIP_LOCK:
+                self._cleanup_old_tasks()
+                pending = [
+                    (tid, task) for tid, task in CLIP_TASKS.items()
+                    if task["status"] == "pending"
+                ]
+                pending.sort(key=lambda x: x[1]["created_at"])
+                if not pending:
+                    self._json(200, {"task": None})
+                    return
+                tid, task = pending[0]
+                task["status"] = "claimed"
+                task["updated_at"] = time.time()
+                self._json(200, {"task": {"task_id": tid, "url": task["url"]}})
+            return
+
+        # Claude Code 查询任务状态: /clip/result/<task_id>
+        if path.startswith("/clip/result/"):
+            tid = path[len("/clip/result/"):]
+            with CLIP_LOCK:
+                task = CLIP_TASKS.get(tid)
+                if not task:
+                    self._json(404, {"error": "task not found"})
+                    return
+                self._json(200, {
+                    "task_id": tid,
+                    "url": task["url"],
+                    "status": task["status"],
+                    "markdown": task.get("markdown"),
+                    "error": task.get("error"),
+                    "created_at": task["created_at"],
+                    "updated_at": task["updated_at"],
+                })
+            return
+
+        self._json(404, {"error": "not found"})
+
+    def _cleanup_old_tasks(self):
+        """清理 1 小时前的任务"""
+        cutoff = time.time() - CLIP_TASK_TTL_SEC
+        to_remove = [tid for tid, t in CLIP_TASKS.items() if t["created_at"] < cutoff]
+        for tid in to_remove:
+            del CLIP_TASKS[tid]
 
     def do_POST(self):
         path = urlparse(self.path).path
+
+        # Claude Code 投递任务: {url}
+        if path == "/clip/enqueue":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+                url = body.get("url", "").strip()
+                if not url:
+                    self._json(400, {"error": "missing url"})
+                    return
+                task_id = uuid.uuid4().hex[:12]
+                now = time.time()
+                with CLIP_LOCK:
+                    CLIP_TASKS[task_id] = {
+                        "url": url,
+                        "status": "pending",
+                        "markdown": None,
+                        "error": None,
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                print(f"[clip enqueue] task_id={task_id} url={url[:80]}", flush=True)
+                self._json(200, {"task_id": task_id, "status": "pending"})
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
+        # 扩展提交结果: {task_id, status: "done"|"error", markdown?, error?}
+        if path == "/clip/result":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+                tid = body.get("task_id")
+                status = body.get("status", "done")
+                with CLIP_LOCK:
+                    task = CLIP_TASKS.get(tid)
+                    if not task:
+                        self._json(404, {"error": "task not found"})
+                        return
+                    task["status"] = status
+                    task["markdown"] = body.get("markdown")
+                    task["error"] = body.get("error")
+                    task["updated_at"] = time.time()
+                print(f"[clip result] task_id={tid} status={status}", flush=True)
+                self._json(200, {"ok": True})
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
         if path != "/transcribe":
             self._json(404, {"error": "not found"})
             return

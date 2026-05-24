@@ -167,3 +167,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   return false;
 });
+
+// ============================================================
+// Clip 任务 polling — 让用户在飞书发链接,这里 polling 拿任务
+// ============================================================
+const CLIP_SERVER = 'http://127.0.0.1:8765';
+const CLIP_POLL_INTERVAL_MS = 5000;
+
+// 只在 douyin.com 顶层路径 polling(视频页/搜索页等子路径也跑,但 server 锁住任务避免重复)
+async function pollClipTask() {
+  try {
+    const resp = await fetch(`${CLIP_SERVER}/clip/poll`, { cache: 'no-store' });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (!data?.task?.task_id) return;
+    // 通知 background SW 去开后台 tab 抓取
+    chrome.runtime.sendMessage({
+      type: 'CLIP_TASK_PICKED',
+      taskId: data.task.task_id,
+      url: data.task.url,
+    });
+  } catch (e) {
+    // server 没起来或网络问题,静默 retry
+  }
+}
+
+if (/(^|\.)douyin\.com$/i.test(location.hostname)) {
+  setInterval(pollClipTask, CLIP_POLL_INTERVAL_MS);
+}

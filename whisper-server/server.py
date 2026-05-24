@@ -32,6 +32,75 @@ MODEL_PATH = pick_model()
 HOST = "127.0.0.1"
 PORT = 8765
 
+# 长视频切分参数
+LONG_THRESHOLD_SEC = 300   # 超过 5 分钟才切
+SEGMENT_SEC = 300          # 每段 5 分钟
+OVERLAP_SEC = 5            # 段间 5 秒重叠(避免边界丢字,接受少量重复)
+
+
+def get_audio_duration(wav_path):
+    """ffprobe 获取音频时长(秒)"""
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", wav_path],
+        capture_output=True, text=True
+    )
+    try:
+        return float(r.stdout.strip())
+    except (ValueError, AttributeError):
+        return 0.0
+
+
+def split_wav(wav_path, tmpdir):
+    """长音频切多段,短音频返回原路径。返回 chunk 路径列表"""
+    duration = get_audio_duration(wav_path)
+    if duration <= LONG_THRESHOLD_SEC:
+        return [wav_path], duration
+
+    chunks = []
+    start = 0.0
+    idx = 0
+    while start < duration:
+        chunk = os.path.join(tmpdir, f"chunk_{idx:03d}.wav")
+        chunk_dur = min(SEGMENT_SEC, duration - start)
+        # 注意:-ss 必须在 -i 前面才能用关键帧 seek(快很多)
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-ss", f"{start:.2f}", "-t", f"{chunk_dur:.2f}",
+             "-i", wav_path, "-c", "copy", chunk],
+            capture_output=True, text=True
+        )
+        if r.returncode != 0:
+            raise RuntimeError(f"ffmpeg split chunk {idx} failed: {r.stderr[-300:]}")
+        chunks.append(chunk)
+        if start + SEGMENT_SEC >= duration:
+            break
+        start += (SEGMENT_SEC - OVERLAP_SEC)
+        idx += 1
+    return chunks, duration
+
+
+def transcribe_one(wav_path, tmpdir, lang, tag=""):
+    """转写单个 wav 文件,返回纯文字"""
+    out_prefix = os.path.join(tmpdir, f"out_{tag or 'main'}")
+    cmd = [
+        "whisper-cli", "-m", MODEL_PATH, "-l", lang,
+        "-tp", "0", "-tpi", "0",
+        "-bs", "5", "-bo", "5",
+        "-nth", "1.0",
+        "-lpt", "-10.0",
+        "-et", "10.0",
+        "-mc", "64",
+        "-nt", "-otxt", "-of", out_prefix, wav_path,
+    ]
+    if lang == "zh":
+        cmd += ["--prompt", "以下是普通话口播视频的内容，请完整准确转写每一句话，不要遗漏。"]
+    ws = subprocess.run(cmd, capture_output=True, text=True)
+    txt_file = out_prefix + ".txt"
+    if not os.path.exists(txt_file):
+        raise RuntimeError(f"whisper failed: {ws.stderr[-500:]}")
+    with open(txt_file, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def _cors(self):
@@ -102,39 +171,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     })
                     return
 
-                # 调 whisper-cli 转写
-                # -tp 0           temperature 0,deterministic
-                # -tpi 0          关掉 fallback temperature 递增(避免"幻觉文字")
-                # -bs 5 -bo 5     beam search + best-of(默认值,显式声明)
-                # --prompt        给个上下文提示,提高中文识别质量
-                out_prefix = os.path.join(tmpdir, "out")
-                cmd = [
-                    "whisper-cli", "-m", MODEL_PATH, "-l", lang,
-                    "-tp", "0", "-tpi", "0",
-                    "-bs", "5", "-bo", "5",
-                    # 防漏识别(不跳任何段):
-                    "-nth", "1.0",      # no_speech_thold 拉到 1.0
-                    "-lpt", "-10.0",    # logprob_thold 极松
-                    "-et", "10.0",      # entropy_thold 极松
-                    # 段间保留 context(用来推断标点),但限制传染范围
-                    "-mc", "64",        # max_context 64 token,既有上下文又不太长
-                    "-nt", "-otxt", "-of", out_prefix, wav,
-                ]
-                if lang == "zh":
-                    cmd += ["--prompt", "以下是普通话口播视频的内容，请完整准确转写每一句话，不要遗漏。"]
-                ws = subprocess.run(cmd, capture_output=True, text=True)
-                txt_file = out_prefix + ".txt"
-                if not os.path.exists(txt_file):
-                    self._json(500, {
-                        "error": "whisper failed",
-                        "stderr": ws.stderr[-1000:],
-                    })
+                # 切分长音频(短的直接整段跑)
+                try:
+                    chunks, duration = split_wav(wav, tmpdir)
+                except RuntimeError as e:
+                    self._json(500, {"error": str(e)})
                     return
 
-                with open(txt_file, "r", encoding="utf-8") as f:
-                    text = f.read().strip()
+                segmented = len(chunks) > 1
+                if segmented:
+                    print(f"[long video] duration={duration:.1f}s, 切成 {len(chunks)} 段(每段 {SEGMENT_SEC}s,重叠 {OVERLAP_SEC}s)", flush=True)
 
-                self._json(200, {"text": text, "lang": lang, "bytes": length})
+                # 逐段转写(顺序,避免 GPU 争用)
+                texts = []
+                try:
+                    for i, chunk in enumerate(chunks):
+                        if segmented:
+                            print(f"  转写段 {i+1}/{len(chunks)}", flush=True)
+                        texts.append(transcribe_one(chunk, tmpdir, lang, tag=f"{i:03d}"))
+                except RuntimeError as e:
+                    self._json(500, {"error": str(e)})
+                    return
+
+                # 拼接(段间用空行分隔,便于阅读;重叠部分会有少量重复)
+                text = "\n\n".join(t for t in texts if t).strip()
+
+                self._json(200, {
+                    "text": text,
+                    "lang": lang,
+                    "bytes": length,
+                    "duration_sec": round(duration, 1),
+                    "segments": len(chunks),
+                })
 
         except Exception as e:
             self._json(500, {"error": str(e)})

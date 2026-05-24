@@ -18,20 +18,34 @@ import time
 import uuid
 from urllib.parse import urlparse, parse_qs
 
-def pick_model():
-    """优先用 large-v3(更准),fallback 到 turbo(更快)"""
-    candidates = [
-        "~/whisper-models/ggml-large-v3.bin",
-        "~/whisper-models/ggml-large-v3-q5_0.bin",
-        "~/whisper-models/ggml-large-v3-turbo.bin",
-    ]
+def _find_first_existing(candidates):
     for c in candidates:
         path = os.path.expanduser(c)
         if os.path.exists(path):
             return path
-    return os.path.expanduser(candidates[-1])
+    return None
 
-MODEL_PATH = pick_model()
+# 准确度优先(短视频),M2 上 1 分钟音频约 1 分钟
+MODEL_PATH_ACCURATE = _find_first_existing([
+    "~/whisper-models/ggml-large-v3.bin",
+    "~/whisper-models/ggml-large-v3-q5_0.bin",
+    "~/whisper-models/ggml-large-v3-turbo.bin",
+])
+
+# 速度优先(长视频),M2 上 1 分钟音频约 10-20 秒
+MODEL_PATH_FAST = _find_first_existing([
+    "~/whisper-models/ggml-large-v3-turbo.bin",
+    "~/whisper-models/ggml-large-v3-q5_0.bin",
+    "~/whisper-models/ggml-large-v3.bin",
+])
+
+MODEL_PATH = MODEL_PATH_ACCURATE  # 默认,health endpoint 显示用
+
+def pick_model_for_duration(duration_sec):
+    """长视频自动切到 fast 模型,短视频用 accurate"""
+    if duration_sec > LONG_THRESHOLD_SEC and MODEL_PATH_FAST != MODEL_PATH_ACCURATE:
+        return MODEL_PATH_FAST
+    return MODEL_PATH_ACCURATE
 HOST = "127.0.0.1"
 PORT = 8765
 
@@ -127,11 +141,11 @@ def dedupe_text(text):
     return "\n".join(out_lines).strip()
 
 
-def transcribe_one(wav_path, tmpdir, lang, tag=""):
+def transcribe_one(wav_path, tmpdir, lang, tag="", model_path=None):
     """转写单个 wav 文件,返回纯文字"""
     out_prefix = os.path.join(tmpdir, f"out_{tag or 'main'}")
     cmd = [
-        "whisper-cli", "-m", MODEL_PATH, "-l", lang,
+        "whisper-cli", "-m", model_path or MODEL_PATH, "-l", lang,
         "-tp", "0", "-tpi", "0",
         "-bs", "5", "-bo", "5",
         "-nth", "1.0",
@@ -321,8 +335,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return
 
                 segmented = len(chunks) > 1
+                model_for_run = pick_model_for_duration(duration)
+                model_name = os.path.basename(model_for_run)
                 if segmented:
-                    print(f"[long video] duration={duration:.1f}s, 切成 {len(chunks)} 段(每段 {SEGMENT_SEC}s,重叠 {OVERLAP_SEC}s)", flush=True)
+                    print(f"[long video] duration={duration:.1f}s, 切成 {len(chunks)} 段(每段 {SEGMENT_SEC}s,重叠 {OVERLAP_SEC}s),用 {model_name}", flush=True)
 
                 # 逐段转写(顺序,避免 GPU 争用)
                 texts = []
@@ -330,7 +346,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     for i, chunk in enumerate(chunks):
                         if segmented:
                             print(f"  转写段 {i+1}/{len(chunks)}", flush=True)
-                        texts.append(transcribe_one(chunk, tmpdir, lang, tag=f"{i:03d}"))
+                        texts.append(transcribe_one(chunk, tmpdir, lang, tag=f"{i:03d}", model_path=model_for_run))
                 except RuntimeError as e:
                     self._json(500, {"error": str(e)})
                     return

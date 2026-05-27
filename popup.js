@@ -254,28 +254,31 @@ function waitForTabAfterNavigation(tabId, expectedPlatform, timeoutMs = 30000) {
 }
 
 async function getCollectionTab(tab, shareUrl) {
-  if (!shareUrl) return tab;
+  if (!shareUrl) return { tab, opened: false };
 
   const platform = detectPlatform(shareUrl);
   if (!platform) throw new Error('粘贴内容里没有识别到抖音或小红书链接');
 
+  // 当前 tab 已经在目标页面,直接复用
   if (samePageUrl(tab.url, shareUrl) && detectPlatform(tab.url || '')) {
-    return tab;
+    return { tab, opened: false };
   }
 
-  setStatus('正在打开分享链接...');
+  setStatus('正在后台打开分享链接...');
   addLog('share.navigate.start', {
     fromUrl: tab.url,
     shareUrl,
     platform,
   });
-  await chrome.tabs.update(tab.id, { url: shareUrl, active: true });
-  const loadedTab = await waitForTabAfterNavigation(tab.id, platform);
+  // 后台新建 tab(active: false 用户看不见),抓完后关掉
+  const newTab = await chrome.tabs.create({ url: shareUrl, active: false });
+  const loadedTab = await waitForTabAfterNavigation(newTab.id, platform);
   addLog('share.navigate.complete', {
     finalUrl: loadedTab.url,
     platform: detectPlatform(loadedTab.url || ''),
+    backgroundTab: true,
   });
-  return loadedTab;
+  return { tab: loadedTab, opened: true };
 }
 
 function runVideoExtractor(platform) {
@@ -1642,7 +1645,7 @@ collectButton.addEventListener('click', async () => {
       apiUrl: config.provider === 'custom' ? config.apiUrl : config.provider,
     });
 
-    const tab = await getCollectionTab(activeTab, shareUrl);
+    const { tab, opened: openedBackgroundTab } = await getCollectionTab(activeTab, shareUrl);
     const platform = detectPlatform(tab.url || '');
     if (!platform) throw new Error('请先打开抖音或小红书视频页面');
 

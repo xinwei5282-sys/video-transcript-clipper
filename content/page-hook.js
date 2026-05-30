@@ -70,8 +70,19 @@
     }, '*');
   }
 
+  function currentDouyinVideoId() {
+    const m = location.pathname.match(/\/video\/(\d+)/);
+    return m ? m[1] : '';
+  }
+
   function publishMeta(meta) {
     if (!meta || typeof meta !== 'object') return;
+    // 只放行与当前视频页 aweme_id 匹配的 meta，忽略页面上推荐位/feed 其它视频，
+    // 避免标题/作者/点赞等数据被别的视频串台覆盖。
+    const targetId = platform() === 'douyin' ? currentDouyinVideoId() : '';
+    // 在 /video/<id> 页：严格只放行 id 等于目标的 meta，连"无 id 的推荐位节点"也挡掉
+    // （否则它们带的标题会通过 mergeMeta 的 {...prev,...next} 把真标题覆盖掉）
+    if (targetId && String(meta.awemeId || '') !== targetId) return;
     window.postMessage({
       type: 'VIDEO_TRANSCRIPT_CLIPPER_META',
       payload: {
